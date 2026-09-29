@@ -1,4 +1,3 @@
-import os
 from decimal import Decimal
 from collections import Counter
 from itertools import combinations
@@ -9,13 +8,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from databricks import sql
-from databricks.sdk.core import Config
 
-# Ensure environment variable is set correctly
-assert os.getenv("DATABRICKS_WAREHOUSE_ID"), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml."
-
-# Databricks config
-cfg = Config()
+# ───────────────────────── Config & Secrets ─────────────────────────
+# Read from .streamlit/secrets.toml (Local) or App Secrets (Streamlit Cloud)
+SERVER_HOSTNAME = st.secrets["DATABRICKS_HOST"]
+HTTP_PATH = st.secrets["DATABRICKS_HTTP_PATH"]
+ACCESS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
 
 # Unity Catalog: workspace (catalog) -> idp (schema)
 SCHEMA = "workspace.idp"
@@ -27,31 +25,7 @@ T_ANOMALIES = f"{SCHEMA}.line_item_anomalies"
 st.set_page_config(page_title="Invoice IDP Analytics", page_icon="🧾", layout="wide")
 
 
-# ───────────────────────── Data access ─────────────────────────
-def sql_query_with_service_principal(query: str) -> pd.DataFrame:
-    """Execute a SQL query using Service Principal credentials."""
-    with sql.connect(
-        server_hostname=cfg.host,
-        http_path=f"/sql/1.0/warehouses/{cfg.warehouse_id}",
-        credentials_provider=lambda: cfg.authenticate,
-    ) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query)
-            return cursor.fetchall_arrow().to_pandas()
-
-
-def sql_query_with_user_token(query: str, user_token: str) -> pd.DataFrame:
-    """Execute a SQL query on behalf of the logged-in user using user credentials."""
-    with sql.connect(
-        server_hostname=cfg.host,
-        http_path=f"/sql/1.0/warehouses/{cfg.warehouse_id}",
-        access_token=user_token,
-    ) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query)
-            return cursor.fetchall_arrow().to_pandas()
-
-
+# ───────────────────────── Data Access ─────────────────────────
 def _decimals_to_float(df: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
         if df[c].dtype == object:
@@ -63,10 +37,16 @@ def _decimals_to_float(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=600, show_spinner="Querying Unity Catalog…")
 def load_table(table: str) -> pd.DataFrame:
-    # Service principal by default. To run as the viewing user instead (needs user
-    # authorization enabled on the app), use st.context.headers.get("x-forwarded-access-token")
-    # with sql_query_with_user_token (and include the token in the cache key).
-    return _decimals_to_float(sql_query_with_service_principal(f"SELECT * FROM {table}"))
+    """Execute a query against Databricks SQL Warehouse using PAT."""
+    with sql.connect(
+        server_hostname=SERVER_HOSTNAME,
+        http_path=HTTP_PATH,
+        access_token=ACCESS_TOKEN,
+    ) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT * FROM {table}")
+            df = cursor.fetchall_arrow().to_pandas()
+            return _decimals_to_float(df)
 
 
 def require(df: pd.DataFrame, cols: list, table: str) -> None:
