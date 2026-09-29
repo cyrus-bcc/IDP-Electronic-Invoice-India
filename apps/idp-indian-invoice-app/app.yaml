@@ -1,0 +1,8 @@
+command: ["streamlit", "run", "app.py"]
+
+env:
+  # Injected from the SQL warehouse resource attached to the app (resource key must match manifest.yaml)
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"

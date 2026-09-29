@@ -1,0 +1,8 @@
+version: 1
+name: invoice-idp-dashboard
+description: Invoice IDP analytics - revenue, buyers, products, segments, CLV, anomalies
+resource_specs:
+  - name: sql-warehouse
+    description: SQL warehouse used to query workspace.idp tables
+    sql_warehouse_spec:
+      permission: CAN_USE
