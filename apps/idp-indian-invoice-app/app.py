@@ -24,6 +24,30 @@ T_ANOMALIES = f"{SCHEMA}.line_item_anomalies"
 
 st.set_page_config(page_title="Invoice IDP Analytics", page_icon="🧾", layout="wide")
 
+# ───────────────────────── Color scheme ─────────────────────────
+# Each color has one job so it means the same thing in every tab.
+PRIMARY = "#4C72B0"   # magnitudes: revenue, spend, counts
+ACCENT = "#DD8452"    # the second series (net vs tax, gross vs net)
+GREEN = "#55A868"     # volume (invoice counts)
+ALERT = "#C44E52"     # flags only: outliers, cumulative % line
+MUTED = "#A9BCD9"     # incomplete or de-emphasised
+TIER_COLORS = {"High": "#1F3A63", "Medium": "#4C72B0", "Low": "#A9BCD9"}  # darker = more valuable
+BRAND_SEQ = px.colors.qualitative.Safe
+
+px.defaults.color_discrete_sequence = BRAND_SEQ
+px.defaults.color_continuous_scale = "Blues"
+
+
+def get_brand(desc: str) -> str:
+    """Brand guessed from the first word of the product description."""
+    parts = str(desc).split()
+    return parts[0] if parts else "Other"
+
+
+def color_map(values) -> dict:
+    """Stable category -> color mapping so a category keeps its color across charts."""
+    return {v: BRAND_SEQ[i % len(BRAND_SEQ)] for i, v in enumerate(sorted(set(values)))}
+
 
 # ───────────────────────── Data Access ─────────────────────────
 def _decimals_to_float(df: pd.DataFrame) -> pd.DataFrame:
@@ -61,7 +85,6 @@ def fmt_inr(x: float) -> str:
     if x >= 1e5:
         return f"₹{x/1e5:.2f} L"
     return f"₹{x:,.0f}"
-
 
 # ───────────────────────── Load & prepare ─────────────────────────
 INVOICE_COLS = ["path", "invoice_number", "invoice_date", "seller_name", "buyer_name",
@@ -154,10 +177,36 @@ inv = (
 )
 inv["avg_line_item_value"] = inv["gross_value"] / inv["line_items"]
 
-# ───────────────────────── Header + KPIs ─────────────────────────
+# ───────────────────────── Header + intro + KPIs ─────────────────────────
 st.title("Invoice IDP Analytics")
 seller = df["seller_name"].mode().iat[0] if df["seller_name"].notna().any() else "—"
 st.caption(f"Seller: **{seller}** · {df['invoice_dt'].min():%d %b %Y} – {df['invoice_dt'].max():%d %b %Y}")
+
+with st.expander("About this dashboard", expanded=True):
+    st.markdown(
+        f"""
+**The dataset.** Invoices issued by **{seller}**, extracted from PDFs by an Intelligent Document
+Processing (IDP) pipeline into Unity Catalog. It currently covers **{inv['invoice_number'].nunique():,} invoices**,
+**{len(df):,} line items** and **{df['buyer_name'].nunique():,} buyers** between
+{df['invoice_dt'].min():%b %Y} and {df['invoice_dt'].max():%b %Y} (the sidebar filters change these numbers).
+Each row is one invoice line: product, quantity, unit price, net value, VAT and gross value.
+
+**The problem.** Invoices are processed manually, so the business has no clear view of who its best buyers
+are, which products drive revenue, or whether the extracted numbers can be trusted.
+
+**What we want to find out.**
+- **Revenue, Buyers, Products:** where the money comes from, and how concentrated it is.
+- **Market Basket, Segments & CLV:** how buyers group together and which products sell together.
+- **Anomalies, Data Quality:** unusual prices or extraction errors worth checking against the source PDFs.
+
+**Read with care.** This is about one year of data with two invoices per buyer, so segments, CLV and
+association rules are rough guides for deciding where to look first, not validated forecasts.
+
+**Colour guide.** Blue is the main measure (darker = more valuable). Orange is the second series
+(e.g. net vs tax). Green is invoice volume. Red marks flags only. Light blue means incomplete or lower value.
+"""
+    )
+
 if n_bad_dates:
     st.warning(f"{n_bad_dates} line item(s) have an unparseable invoice date and are excluded from all charts.")
 
@@ -182,14 +231,14 @@ with tabs[0]:
                     net=("line_item_net_worth", "sum"), tax=("tax_value", "sum"))
                .reset_index().sort_values("month"))
     edge = {monthly["month"].iloc[0], monthly["month"].iloc[-1]} if len(monthly) > 1 else set()
-    colors = ["#A9BCD9" if m in edge else "#4C72B0" for m in monthly["month"]]
+    colors = [MUTED if m in edge else PRIMARY for m in monthly["month"]]
 
     fig = go.Figure()
     fig.add_bar(x=monthly["month"], y=monthly["gross"] / 1e6, name="Gross (₹M)", marker_color=colors)
     fig.add_scatter(x=monthly["month"], y=monthly["net"] / 1e6, name="Net (₹M)",
-                    mode="lines+markers", line=dict(color="#DD8452", width=3))
+                    mode="lines+markers", line=dict(color=ACCENT, width=3))
     fig.add_scatter(x=monthly["month"], y=monthly["invoices"], name="Invoices", yaxis="y2",
-                    mode="lines+markers", line=dict(color="#55A868", dash="dash"))
+                    mode="lines+markers", line=dict(color=GREEN, dash="dash"))
     fig.update_layout(title="Monthly Revenue — Gross vs Net", yaxis_title="₹ Millions",
                       yaxis2=dict(title="Invoices", overlaying="y", side="right"),
                       legend=dict(orientation="h", y=-0.2), height=430)
@@ -209,16 +258,16 @@ with tabs[0]:
     with c1:
         f2 = go.Figure()
         f2.add_scatter(x=monthly["month"], y=monthly["net"] / 1e6, stackgroup="one", name="Net",
-                       line=dict(color="#4C72B0"))
+                       line=dict(color=PRIMARY))
         f2.add_scatter(x=monthly["month"], y=monthly["tax"] / 1e6, stackgroup="one", name="Tax",
-                       line=dict(color="#DD8452"))
+                       line=dict(color=ACCENT))
         f2.update_layout(title="Revenue Composition: Net vs Tax (₹M)", height=380)
         st.plotly_chart(f2)
     with c2:
         st.plotly_chart(px.histogram(inv, x=inv["gross_value"] / 1e5, nbins=20,
                                      labels={"x": "Invoice value (₹ Lakhs)"},
                                      title="Invoice Size Distribution",
-                                     color_discrete_sequence=["#55A868"]).update_layout(height=380))
+                                     color_discrete_sequence=[PRIMARY]).update_layout(height=380))
     st.caption("Forecasting is intentionally not included: 13 months (with two partial edge months) is too little "
                "history to beat a simple average.")
 
@@ -235,16 +284,17 @@ with tabs[1]:
     c1, c2 = st.columns(2)
     with c1:
         t = buyers.head(top_n).iloc[::-1]
+        # One color: bar length already shows spend, so a gradient would only repeat it.
         st.plotly_chart(px.bar(t, x=t["spend"] / 1e6, y="buyer_name", orientation="h",
                                labels={"x": "Total spend (₹M)", "buyer_name": ""},
                                title=f"Top {top_n} Buyers by Spend",
-                               color=t["spend"], color_continuous_scale="RdYlGn_r")
-                        .update_layout(height=520, coloraxis_showscale=False))
+                               color_discrete_sequence=[PRIMARY])
+                        .update_layout(height=520))
     with c2:
         p = go.Figure()
-        p.add_bar(x=buyers["rank"], y=buyers["spend"] / 1e6, name="Spend (₹M)", marker_color="#4C72B0")
+        p.add_bar(x=buyers["rank"], y=buyers["spend"] / 1e6, name="Spend (₹M)", marker_color=PRIMARY)
         p.add_scatter(x=buyers["rank"], y=buyers["cum_pct"], name="Cumulative %", yaxis="y2",
-                      line=dict(color="#C44E52", width=3))
+                      line=dict(color=ALERT, width=3))
         p.add_hline(y=80, line_dash="dash", line_color="gray", yref="y2")
         p.update_layout(title="Buyer Concentration (Pareto)", xaxis_title="Buyer rank",
                         yaxis_title="₹M", yaxis2=dict(overlaying="y", side="right", range=[0, 105],
@@ -274,7 +324,8 @@ with tabs[1]:
         with c1:
             t = state.head(10).iloc[::-1]
             st.plotly_chart(px.bar(t, x=t["spend"] / 1e6, y="region", orientation="h",
-                                   labels={"x": "₹M", "region": ""}, title="Top 10 States by Spend")
+                                   labels={"x": "₹M", "region": ""}, title="Top 10 States by Spend",
+                                   color_discrete_sequence=[PRIMARY])
                             .update_layout(height=400))
         with c2:
             pie = state.head(6)[["region", "spend"]]
@@ -282,7 +333,9 @@ with tabs[1]:
             if rest > 0:
                 pie = pd.concat([pie, pd.DataFrame({"region": ["All other states"], "spend": [rest]})])
             st.plotly_chart(px.pie(pie, names="region", values="spend", hole=0.4,
-                                   title="Revenue Share by State").update_layout(height=400))
+                                   title="Revenue Share by State",
+                                   color_discrete_sequence=px.colors.sequential.Blues_r)
+                            .update_layout(height=400))
 
 # ───────────────────────── Products ─────────────────────────
 with tabs[2]:
@@ -291,24 +344,29 @@ with tabs[2]:
                  avg_price=("line_item_net_price", "mean"), revenue=("line_item_gross_worth", "sum"))
             .reset_index().rename(columns={"line_item_description": "product"})
             .sort_values("revenue", ascending=False))
+    prod["brand"] = prod["product"].apply(get_brand)
+    brand_colors = color_map(prod["brand"])
+
     c1, c2 = st.columns(2)
     with c1:
         t = prod.head(15).iloc[::-1]
+        # Color = brand (legend shown); bar length already shows revenue.
         st.plotly_chart(px.bar(t, x=t["revenue"] / 1e6, y="product", orientation="h",
-                               labels={"x": "Revenue (₹M)", "product": ""},
-                               title="Top 15 Products by Revenue",
-                               color=t["revenue"], color_continuous_scale="Viridis")
-                        .update_layout(height=520, coloraxis_showscale=False))
-    with c2:
-        st.plotly_chart(px.scatter(prod, x="qty", y=prod["avg_price"] / 1e3, size="revenue",
-                                   color=prod["revenue"] / 1e6, hover_name="product",
-                                   color_continuous_scale="YlOrRd",
-                                   labels={"qty": "Total quantity", "y": "Avg unit price (₹K)",
-                                           "color": "Rev ₹M"},
-                                   title="Price vs Volume (bubble = revenue)")
+                               color="brand", color_discrete_map=brand_colors,
+                               labels={"x": "Revenue (₹M)", "product": "", "brand": "Brand"},
+                               title="Top 15 Products by Revenue")
                         .update_layout(height=520))
-    st.caption("Products are grouped by the exact description text, so the same item spelled two ways "
-               "would appear as two products.")
+    with c2:
+        # Bubble size already encodes revenue, so color encodes brand instead.
+        st.plotly_chart(px.scatter(prod, x="qty", y=prod["avg_price"] / 1e3, size="revenue",
+                                   color="brand", color_discrete_map=brand_colors,
+                                   hover_name="product",
+                                   labels={"qty": "Total quantity", "y": "Avg unit price (₹K)",
+                                           "brand": "Brand"},
+                                   title="Price vs Volume (bubble = revenue, colour = brand)")
+                        .update_layout(height=520))
+    st.caption("Brand is guessed from the first word of the product description. Products are grouped by the "
+               "exact description text, so the same item spelled two ways would appear as two products.")
     st.dataframe(prod.round(2), hide_index=True)
 
 # ───────────────────────── Market Basket ─────────────────────────
@@ -346,7 +404,8 @@ with tabs[3]:
         if not top_pairs.empty:
             st.plotly_chart(px.bar(top_pairs.iloc[::-1], x="freq", y="pair", orientation="h",
                                    title="Top 10 Product Pairs (all, ignoring thresholds)",
-                                   labels={"freq": "Co-occurrences", "pair": ""}).update_layout(height=450))
+                                   labels={"freq": "Co-occurrences", "pair": ""},
+                                   color_discrete_sequence=[PRIMARY]).update_layout(height=450))
         else:
             st.info("No product pairs (every invoice has a single product).")
     with c2:
@@ -355,8 +414,9 @@ with tabs[3]:
         else:
             st.plotly_chart(px.scatter(rules, x="support", y="confidence", color="lift",
                                        hover_data=["antecedent", "consequent", "co_occurrence"],
-                                       color_continuous_scale="YlOrRd",
-                                       title="Rules: Support vs Confidence (color = Lift)")
+                                       color_continuous_scale="Blues",
+                                       labels={"lift": "Lift (1 = chance level)"},
+                                       title="Rules: Support vs Confidence (darker = higher lift)")
                             .update_layout(height=450))
     if not rules.empty:
         st.subheader(f"{len(rules)} rules (sorted by lift)")
@@ -388,18 +448,22 @@ with tabs[4]:
                 rec_lbl = summ["avg_recency_days"].le(med_r).map({True: "recent", False: "lapsed"})
                 spd_lbl = summ["avg_spend"].ge(med_s).map({True: "high spend", False: "low spend"})
                 summ["profile"] = rec_lbl + " · " + spd_lbl
+                seg_colors = color_map(seg["segment_name"])  # same segment, same color in every chart
                 st.caption("Segment names come from a notebook heuristic (spend ÷ recency rank). Read the "
                            "**profile** column — a segment called 'Key Accounts' is not necessarily the one "
                            "with the most revenue.")
                 c1, c2 = st.columns(2)
                 c1.plotly_chart(px.bar(summ, x="segment_name", y="buyers", color="segment_name",
+                                       color_discrete_map=seg_colors,
                                        title="Segment sizes").update_layout(showlegend=False))
                 c2.plotly_chart(px.bar(summ, x="segment_name", y=summ["total_revenue"] / 1e6,
-                                       color="segment_name", labels={"y": "₹M"},
+                                       color="segment_name", color_discrete_map=seg_colors,
+                                       labels={"y": "₹M"},
                                        title="Revenue by segment").update_layout(showlegend=False))
                 st.plotly_chart(px.scatter(seg, x="recency_days", y=seg["total_spend"] / 1e5,
-                                           color="segment_name", hover_name="buyer_name",
-                                           labels={"y": "Total spend (₹L)"},
+                                           color="segment_name", color_discrete_map=seg_colors,
+                                           hover_name="buyer_name",
+                                           labels={"y": "Total spend (₹L)", "segment_name": "Segment"},
                                            title="Buyers: recency vs spend"))
                 st.dataframe(summ.round(1), hide_index=True)
                 with st.expander("Buyer-level segments"):
@@ -433,17 +497,21 @@ with tabs[4]:
                 b.metric("Median per buyer", fmt_inr(clv["clv_6m"].median()))
                 c.metric("Avg P(alive)", f"{clv['p_alive'].mean():.2f}")
                 d.metric("Buyers with P<0.5", int((clv["p_alive"] < 0.5).sum()))
-                tier_colors = {"High": "#C44E52", "Medium": "#DD8452", "Low": "#4C72B0"}
+                tier_order = {"clv_tier": ["High", "Medium", "Low"]}
                 c1, c2 = st.columns(2)
                 c1.plotly_chart(px.histogram(clv, x=clv["clv_6m"] / 1e5, nbins=15,
-                                             labels={"x": "6-month estimate (₹L)"}, title="Estimate distribution"))
+                                             labels={"x": "6-month estimate (₹L)"}, title="Estimate distribution",
+                                             color_discrete_sequence=[PRIMARY]))
                 c2.plotly_chart(px.scatter(clv, x="p_alive", y=clv["clv_6m"] / 1e5, color="clv_tier",
-                                           color_discrete_map=tier_colors, hover_name="buyer_name",
-                                           labels={"y": "Estimate (₹L)"}, title="P(alive) vs estimate"))
+                                           color_discrete_map=TIER_COLORS, category_orders=tier_order,
+                                           hover_name="buyer_name",
+                                           labels={"y": "Estimate (₹L)", "clv_tier": "CLV tier"},
+                                           title="P(alive) vs estimate"))
                 t = clv.nlargest(15, "clv_6m").iloc[::-1]
                 st.plotly_chart(px.bar(t, x=t["clv_6m"] / 1e5, y="buyer_name", orientation="h",
-                                       color="clv_tier", color_discrete_map=tier_colors,
-                                       labels={"x": "Estimate (₹L)", "buyer_name": ""},
+                                       color="clv_tier", color_discrete_map=TIER_COLORS,
+                                       category_orders=tier_order,
+                                       labels={"x": "Estimate (₹L)", "buyer_name": "", "clv_tier": "CLV tier"},
                                        title="Top 15 buyers by estimate").update_layout(height=520))
                 st.dataframe(clv.sort_values("clv_6m", ascending=False).round(2), hide_index=True)
         except Exception as e:
@@ -468,7 +536,8 @@ with tabs[5]:
         flagged_p = pp[pp["deviation_%"].abs() > thr].sort_values("deviation_%", key=abs, ascending=False)
         st.metric("Lines flagged", f"{len(flagged_p)} of {len(pp)}")
         st.plotly_chart(px.histogram(pp, x="deviation_%", nbins=30,
-                                     title="How far unit prices sit from their product median (%)"))
+                                     title="How far unit prices sit from their product median (%)",
+                                     color_discrete_sequence=[PRIMARY]))
         st.dataframe(flagged_p.round(2), hide_index=True)
 
         st.subheader("2 · Isolation Forest outliers")
@@ -490,7 +559,7 @@ with tabs[5]:
             a, b = st.columns(2)
             a.metric("Line items scored", f"{len(an):,}")
             b.metric("Flagged as outliers", f"{len(flagged):,}")
-            cmap = {"Normal": "#4C72B0", "Outlier": "#FF3333"}
+            cmap = {"Normal": MUTED, "Outlier": ALERT}
             c1, c2 = st.columns(2)
             c1.plotly_chart(px.scatter(an, x="quantity", y="unit_price", color="status",
                                        color_discrete_map=cmap, hover_data=["invoice_number", "product"],
@@ -567,7 +636,7 @@ with tabs[7]:
                                "tax_value": "tax_amount"})
     fig = px.scatter(show, x="line_item_count", y=show["gross_value"] / 1e5, hover_name="invoice_number",
                      labels={"y": "Gross value (₹L)", "line_item_count": "Line items"},
-                     title="Invoice value vs line item count")
+                     title="Invoice value vs line item count", color_discrete_sequence=[PRIMARY])
     if show["line_item_count"].nunique() > 1 and len(show) >= 3:
         slope, icpt = np.polyfit(show["line_item_count"], show["gross_value"] / 1e5, 1)
         xs = np.array([show["line_item_count"].min(), show["line_item_count"].max()])
